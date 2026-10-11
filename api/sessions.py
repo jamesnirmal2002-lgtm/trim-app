@@ -9,6 +9,25 @@ from urllib.parse import parse_qs, urlparse
 from supabase import Client, create_client
 
 
+# The React UI uses friendly display labels. The database check constraint uses
+# these lowercase values, so the API is the single place that translates them.
+WASTE_LEVELS = {
+    "None": "none",
+    "A few": "few",
+    "About half": "half",
+    "Most": "most",
+    # Accept canonical values too, which is helpful for direct API consumers.
+    "none": "none",
+    "few": "few",
+    "half": "half",
+    "most": "most",
+}
+
+# log_sessions.status is constrained to these two values. A log only reaches
+# Supabase after successful validation, so every inserted session is success.
+SUCCESS_STATUS = "success"
+
+
 def send_json(request: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
     """Write a JSON response with a consistent content type."""
     request.send_response(status)
@@ -51,7 +70,6 @@ def validate_session_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], L
     venue_id = payload.get("venue_id")
     duration_seconds = payload.get("duration_seconds")
     estimated_value = payload.get("estimated_value")
-    status = payload.get("status")
     entries = payload.get("entries")
 
     if not isinstance(venue_id, str) or not venue_id.strip():
@@ -60,8 +78,6 @@ def validate_session_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], L
         return {}, [], "duration_seconds must be a non-negative whole number."
     if not is_number(estimated_value) or estimated_value < 0:
         return {}, [], "estimated_value must be a non-negative number."
-    if not isinstance(status, str) or not status.strip():
-        return {}, [], "status is required."
     if not isinstance(entries, list) or not entries:
         return {}, [], "entries must contain at least one waste entry."
 
@@ -75,20 +91,26 @@ def validate_session_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], L
         unit_cost = entry.get("unit_cost")
         if not isinstance(item_name, str) or not item_name.strip():
             return {}, [], "Each entry requires item_name."
-        if not isinstance(waste_level, str) or not waste_level.strip():
-            return {}, [], "Each entry requires waste_level."
+        if not isinstance(waste_level, str) or waste_level not in WASTE_LEVELS:
+            return {}, [], "Each entry waste_level must be none, few, half, or most."
         if not is_number(unit_cost) or unit_cost < 0:
             return {}, [], "Each entry requires a non-negative unit_cost."
 
         prepared_entries.append(
-            {"item_name": item_name.strip(), "waste_level": waste_level.strip(), "unit_cost": unit_cost}
+            {
+                "item_name": item_name.strip(),
+                "waste_level": WASTE_LEVELS[waste_level],
+                "unit_cost": unit_cost,
+            }
         )
 
     session_row = {
         "venue_id": venue_id.strip(),
         "duration_seconds": duration_seconds,
         "estimated_value": estimated_value,
-        "status": status.strip(),
+        # Do not trust a client-supplied status. This is set only after the
+        # complete request passes validation, matching the database constraint.
+        "status": SUCCESS_STATUS,
     }
     return session_row, prepared_entries, ""
 
